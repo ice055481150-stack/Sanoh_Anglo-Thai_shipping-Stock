@@ -83,6 +83,31 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
+  // Warehouse Scanner Login Stage State
+  const [scannerUnlocked, setScannerUnlocked] = useState(false);
+  const [isScanningHold, setIsScanningHold] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+  const [audioMuted, setAudioMuted] = useState(false);
+  const [scannerReadout, setScannerReadout] = useState({
+    state: 'IDLE_READY',
+    screenTop: 'READY',
+    screenBottom: 'DRAG TO CODE',
+    terminalStatus: 'WAITING_FOR_SCANNER...',
+    barcodeText: '',
+    log: '> ลากเครื่องสแกนไปทาบแถบบาร์โค้ด WMS-8829-4012 ค้างไว้ 2 วินาที'
+  });
+
+  const scannerGroupRef = useRef(null);
+  const barcodeTargetRef = useRef(null);
+  const scanTimerRef = useRef(null);
+  const dragRef = useRef({
+    dragging: false,
+    startX: 0,
+    startY: 0,
+    offsetX: 0,
+    offsetY: 0
+  });
+
   // Admin-only Staff Register Modal State (locked to role: 'user_shipping')
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
   const [staffFullName, setStaffFullName] = useState('');
@@ -150,6 +175,176 @@ export default function App() {
   const [editCustomNo, setEditCustomNo] = useState('');
   const [editRefDoc, setEditRefDoc] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
+
+  const playScannerTone = (freq = 900, ms = 110) => {
+    if (audioMuted) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      gain.gain.value = 0.035;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      setTimeout(() => {
+        osc.stop();
+        ctx.close();
+      }, ms);
+    } catch {
+      // ข้ามหากเบราว์เซอร์จำกัดเสียง
+    }
+  };
+
+  const finishScanUnlock = () => {
+    window.clearInterval(scanTimerRef.current);
+    scanTimerRef.current = null;
+    setIsScanningHold(false);
+    setScanProgress(100);
+    setScannerUnlocked(true);
+    playScannerTone(1240, 180);
+    setScannerReadout({
+      state: 'UNLOCKED_READY',
+      screenTop: 'VERIFIED',
+      screenBottom: 'UNLOCKED',
+      terminalStatus: 'BARCODE_VERIFIED_OK',
+      barcodeText: 'WMS-8829-4012',
+      log: '> สแกนบาร์โค้ดครบ 2 วินาทีเรียบร้อย ปลดล็อกฟอร์มเข้าสู่ระบบแล้ว'
+    });
+  };
+
+  const beginScanHold = () => {
+    if (scannerUnlocked || scanTimerRef.current) return;
+    setIsScanningHold(true);
+    setScannerReadout((prev) => ({
+      ...prev,
+      state: 'SCANNING_2S',
+      screenTop: 'SCANNING',
+      screenBottom: 'HOLD 2.0S',
+      terminalStatus: 'RECEIVING_BARCODE_DATA...',
+      log: '> กำลังอ่านข้อมูลแถบบาร์โค้ดจากเครื่องสแกน...'
+    }));
+
+    const startedAt = Date.now();
+    const totalMs = 2000;
+
+    scanTimerRef.current = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const pct = Math.min(100, Math.round((elapsed / totalMs) * 100));
+      setScanProgress(pct);
+      setScannerReadout((prev) => ({
+        ...prev,
+        barcodeText: 'WMS-8829-4012'.slice(0, Math.max(1, Math.ceil((pct / 100) * 13)))
+      }));
+
+      if (elapsed >= totalMs) {
+        finishScanUnlock();
+      }
+    }, 50);
+  };
+
+  const abortScanHold = () => {
+    if (!scanTimerRef.current) return;
+    window.clearInterval(scanTimerRef.current);
+    scanTimerRef.current = null;
+    setIsScanningHold(false);
+    if (!scannerUnlocked) {
+      setScanProgress(0);
+      setScannerReadout({
+        state: 'IDLE_READY',
+        screenTop: 'READY',
+        screenBottom: 'DRAG TO CODE',
+        terminalStatus: 'SCAN_INTERRUPTED',
+        barcodeText: '',
+        log: '> ยกเลิกการสแกนก่อนครบ 2 วินาที กรุณาทาบค้างไว้ใหม่'
+      });
+    }
+  };
+
+  const evaluateBarcodeHit = () => {
+    const scannerEl = scannerGroupRef.current;
+    const targetEl = barcodeTargetRef.current;
+    if (!scannerEl || !targetEl) return;
+
+    const r1 = scannerEl.getBoundingClientRect();
+    const r2 = targetEl.getBoundingClientRect();
+    const overlaps = !(
+      r1.right < r2.left ||
+      r1.left > r2.right ||
+      r1.bottom < r2.top ||
+      r1.top > r2.bottom
+    );
+
+    if (overlaps) beginScanHold();
+    else abortScanHold();
+  };
+
+  const handleScannerPointerDown = (e) => {
+    if (scannerUnlocked) return;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    dragRef.current.dragging = true;
+    dragRef.current.startX = e.clientX - dragRef.current.offsetX;
+    dragRef.current.startY = e.clientY - dragRef.current.offsetY;
+    playScannerTone(700, 70);
+  };
+
+  const handleScannerPointerMove = (e) => {
+    if (!dragRef.current.dragging || scannerUnlocked) return;
+    const x = e.clientX - dragRef.current.startX;
+    const y = e.clientY - dragRef.current.startY;
+    dragRef.current.offsetX = x;
+    dragRef.current.offsetY = y;
+    if (scannerGroupRef.current) {
+      scannerGroupRef.current.setAttribute('transform', `translate(${x}, ${y})`);
+    }
+    evaluateBarcodeHit();
+  };
+
+  const handleScannerPointerUp = () => {
+    dragRef.current.dragging = false;
+    abortScanHold();
+  };
+
+  const handleAutoScanDemo = () => {
+    window.clearInterval(scanTimerRef.current);
+    scanTimerRef.current = null;
+    setScannerUnlocked(false);
+    setScanProgress(0);
+    dragRef.current.offsetX = 185;
+    dragRef.current.offsetY = 78;
+    if (scannerGroupRef.current) {
+      scannerGroupRef.current.setAttribute('transform', 'translate(185, 78)');
+    }
+    playScannerTone(780, 80);
+    beginScanHold();
+  };
+
+  const handleResetScanner = () => {
+    window.clearInterval(scanTimerRef.current);
+    scanTimerRef.current = null;
+    setIsScanningHold(false);
+    setScanProgress(0);
+    setScannerUnlocked(false);
+    dragRef.current.offsetX = 0;
+    dragRef.current.offsetY = 0;
+    if (scannerGroupRef.current) {
+      scannerGroupRef.current.setAttribute('transform', 'translate(0, 0)');
+    }
+    setScannerReadout({
+      state: 'IDLE_READY',
+      screenTop: 'READY',
+      screenBottom: 'DRAG TO CODE',
+      terminalStatus: 'WAITING_FOR_SCANNER...',
+      barcodeText: '',
+      log: '> รีเซ็ตตำแหน่งเครื่องสแกนเรียบร้อย ลากไปที่แถบบาร์โค้ดเพื่อปลดล็อก'
+    });
+  };
+
+  useEffect(() => {
+    return () => window.clearInterval(scanTimerRef.current);
+  }, []);
 
   const getExpirySelectionForRow = (rowId) => {
     return requestExpiryMap[rowId] || {
@@ -228,6 +423,9 @@ export default function App() {
   // เข้าสู่ระบบ
   const handleLogin = async (e) => {
     e.preventDefault();
+    if (!scannerUnlocked) {
+      return alert('กรุณาสแกนบาร์โค้ดบนกล่องพัสดุค้างไว้ 2 วินาทีเพื่อปลดล็อกระบบก่อนเข้าสู่ระบบ');
+    }
     if (!loginUsername.trim() || !loginPassword.trim()) {
       return alert('กรุณากรอกชื่อผู้ใช้และรหัสผ่าน');
     }
@@ -471,6 +669,8 @@ export default function App() {
   const handleLogout = () => {
     setCurrentUser(null);
     localStorage.removeItem('sanoh_session_user');
+    setScannerUnlocked(false);
+    setScanProgress(0);
     setIsEditModalOpen(false);
     setIsModalOpen(false);
     setIsRegisterModalOpen(false);
@@ -817,58 +1017,249 @@ export default function App() {
     document.body.removeChild(link);
   };
 
-  // --- หน้า Login เท่านั้น เมื่อยังไม่ได้เข้าสู่ระบบ ---
+  // --- หน้า Warehouse Scanner Login เมื่อยังไม่ได้เข้าสู่ระบบ ---
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-[#11161d] text-gray-200 font-sans flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-[#181f29] border border-gray-800 rounded-2xl p-6 sm:p-8 shadow-2xl">
-          <div className="text-center mb-6">
-            <div className="w-14 h-14 mx-auto rounded-xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400 mb-3">
-              <Package size={28} />
+      <div className="min-h-screen bg-[#050403] text-stone-100 flex flex-col justify-between relative overflow-x-hidden">
+        <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-orange-950/35 via-[#060504] to-black pointer-events-none z-0" />
+
+        {/* Top Header */}
+        <header className="relative z-20 w-full max-w-7xl mx-auto px-6 py-5 flex items-center justify-between">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-orange-500 via-amber-500 to-orange-600 p-0.5 shadow-lg shadow-orange-500/25">
+              <div className="w-full h-full bg-[#060504] rounded-[14px] flex items-center justify-center text-orange-400">
+                <Package size={22} />
+              </div>
             </div>
-            <p className="text-[11px] font-semibold tracking-wider text-sky-400 uppercase">
-              SANOH ANGLO-THAI SHIPPING
-            </p>
-            <h1 className="text-xl font-bold text-white mt-1">
-              ระบบจัดการสต็อก Neck Tag
-            </h1>
-            <p className="text-xs text-gray-400 mt-1">
-              กรุณาเข้าสู่ระบบเพื่อใช้งานระบบ
-            </p>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-lg font-black tracking-wider bg-gradient-to-r from-stone-100 via-orange-200 to-orange-400 bg-clip-text text-transparent">
+                  SANOH NECK TAG
+                </span>
+                <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-orange-500/20 text-orange-300 border border-orange-500/30 rounded-md">
+                  WMS v4.5
+                </span>
+              </div>
+              <p className="text-[11px] text-stone-400">
+                Sanoh Anglo-Thai Shipping • ระบบจัดการสต็อก Neck Tag & คลังพัสดุ
+              </p>
+            </div>
           </div>
 
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-300 mb-1.5">ชื่อผู้ใช้ (Username)</label>
-              <input
-                type="text"
-                required
-                placeholder="เช่น admin_sanoh หรือ staff_sanoh"
-                value={loginUsername}
-                onChange={(e) => setLoginUsername(e.target.value)}
-                className="w-full bg-[#12171f] border border-gray-700 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-sky-500"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-300 mb-1.5">รหัสผ่าน (Password)</label>
-              <input
-                type="password"
-                required
-                placeholder="••••••••"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                className="w-full bg-[#12171f] border border-gray-700 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-sky-500"
-              />
-            </div>
+          <div className="flex items-center gap-3">
             <button
-              type="submit"
-              disabled={authLoading}
-              className="w-full bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg text-sm transition cursor-pointer"
+              type="button"
+              onClick={() => setAudioMuted((m) => !m)}
+              className="px-3 py-2 rounded-xl bg-[#100c09] border border-stone-800 hover:border-orange-500/40 text-xs text-stone-300 cursor-pointer"
             >
-              {authLoading ? 'กำลังตรวจสอบ...' : 'เข้าสู่ระบบ'}
+              {audioMuted ? '🔇 ปิดเสียง' : '🔊 เปิดเสียง'}
             </button>
-          </form>
-        </div>
+
+            <div
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs font-mono font-semibold ${
+                scannerUnlocked
+                  ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
+                  : 'bg-[#100c09] border-amber-500/30 text-amber-400'
+              }`}
+            >
+              <span className={`h-2.5 w-2.5 rounded-full ${scannerUnlocked ? 'bg-emerald-400' : 'bg-amber-500 animate-ping'}`} />
+              <span>{scannerUnlocked ? 'SYS: UNLOCKED' : 'SYS: LOCKED'}</span>
+            </div>
+          </div>
+        </header>
+
+        {/* Main Grid */}
+        <main className="relative z-10 w-full max-w-7xl mx-auto px-4 sm:px-6 py-4 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+          {/* Left: Warehouse Stage */}
+          <section className="lg:col-span-7 flex flex-col items-center justify-center relative min-h-[460px] rounded-3xl bg-[#060504]/70 border border-orange-500/15 p-4 sm:p-6 select-none">
+            <div className="mb-2 bg-orange-500/10 border border-orange-500/30 text-orange-300 text-xs px-4 py-2 rounded-xl">
+              🎯 ลาก <b>เครื่องสแกน</b> ไปทาบที่แถบบาร์โค้ดบนกล่องค้างไว้ <b>2 วินาที</b> เพื่อปลดล็อกฟอร์ม
+            </div>
+
+            <div className="w-full max-w-[580px] h-[330px] flex items-center justify-center">
+              <svg className="w-full h-full overflow-visible" viewBox="0 0 600 420">
+                <defs>
+                  <linearGradient id="sanohCardboardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#d97706" />
+                    <stop offset="100%" stopColor="#78350f" />
+                  </linearGradient>
+                </defs>
+
+                {/* Conveyor Belt */}
+                <rect x="130" y="315" width="440" height="36" rx="8" fill="#140f0c" stroke="#29201a" strokeWidth="3" />
+                <rect x="140" y="319" width="420" height="14" rx="4" fill="#070504" />
+                <line
+                  x1="142"
+                  y1="326"
+                  x2="558"
+                  y2="326"
+                  stroke="#ea580c"
+                  strokeWidth="4"
+                  strokeDasharray="8 16"
+                />
+
+                {/* Cargo Box & Barcode */}
+                <g>
+                  <rect x="230" y="215" width="100" height="100" rx="8" fill="url(#sanohCardboardGrad)" stroke="#78350f" strokeWidth="2" />
+                  <line x1="280" y1="215" x2="280" y2="315" stroke="#92400e" strokeWidth="3" />
+
+                  <g ref={barcodeTargetRef}>
+                    <rect x="240" y="270" width="80" height="36" rx="5" fill="#ffffff" stroke="#fde68a" strokeWidth="2" />
+                    <g fill="#1c1917">
+                      <rect x="246" y="274" width="3" height="20" />
+                      <rect x="252" y="274" width="2" height="20" />
+                      <rect x="257" y="274" width="4" height="20" />
+                      <rect x="264" y="274" width="2" height="20" />
+                      <rect x="269" y="274" width="5" height="20" />
+                      <rect x="277" y="274" width="2" height="20" />
+                      <rect x="282" y="274" width="4" height="20" />
+                      <rect x="289" y="274" width="3" height="20" />
+                      <rect x="295" y="274" width="2" height="20" />
+                      <rect x="300" y="274" width="5" height="20" />
+                      <rect x="308" y="274" width="3" height="20" />
+                    </g>
+                    <text x="280" y="300" fontFamily="monospace" fontSize="5.5" fontWeight="bold" fill="#1c1917" textAnchor="middle">
+                      WMS-8829-4012
+                    </text>
+                  </g>
+
+                  <rect x="236" y="266" width="88" height="44" rx="8" fill="none" stroke="#f97316" strokeWidth="2" strokeDasharray="4 4" />
+                </g>
+
+                {/* Draggable Handheld Scanner */}
+                <g
+                  ref={scannerGroupRef}
+                  onPointerDown={handleScannerPointerDown}
+                  onPointerMove={handleScannerPointerMove}
+                  onPointerUp={handleScannerPointerUp}
+                  onPointerCancel={handleScannerPointerUp}
+                  style={{ touchAction: 'none', cursor: scannerUnlocked ? 'default' : 'grab' }}
+                >
+                  <rect x="58" y="195" width="26" height="50" rx="6" fill="#1c1917" stroke="#f97316" strokeWidth="2" transform="rotate(15, 71, 220)" />
+                  <path d="M 43 180 C 43 162, 97 162, 97 180 L 92 202 L 48 202 Z" fill="#f97316" stroke="#ea580c" strokeWidth="2" />
+                  <rect x="52" y="177" width="36" height="18" rx="2" fill={isScanningHold ? '#7f1d1d' : '#1c1917'} />
+                  <text x="70" y="185.5" fontFamily="monospace" fontSize="5.5" fontWeight="bold" fill="#ffffff" textAnchor="middle">
+                    {scannerReadout.screenTop}
+                  </text>
+                  <text x="70" y="192.5" fontFamily="monospace" fontSize="4.8" fontWeight="bold" fill="#fdba74" textAnchor="middle">
+                    {scannerReadout.screenBottom}
+                  </text>
+                </g>
+              </svg>
+            </div>
+
+            {/* Terminal & Progress Readout */}
+            <div className="w-full max-w-lg bg-black/80 border border-orange-500/30 rounded-2xl p-3.5 font-mono text-xs space-y-2">
+              <div className="flex items-center justify-between text-stone-400">
+                <span>HOLD_PROGRESS: <strong className="text-orange-300">{scanProgress}%</strong></span>
+                <span>BARCODE: <strong className="text-orange-300">{scannerReadout.barcodeText || 'NONE'}</strong></span>
+              </div>
+              <div className="w-full h-2 bg-stone-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-orange-500 to-emerald-400 transition-all duration-75"
+                  style={{ width: `${scanProgress}%` }}
+                />
+              </div>
+              <p className="text-stone-300">{scannerReadout.log}</p>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={handleAutoScanDemo}
+                className="bg-[#100c09] hover:bg-[#18120e] text-orange-300 border border-orange-500/35 text-xs px-4 py-2.5 rounded-xl font-medium cursor-pointer"
+              >
+                🚀 สาธิตการสแกนอัตโนมัติ (2s)
+              </button>
+              <button
+                type="button"
+                onClick={handleResetScanner}
+                className="bg-[#100c09] hover:bg-[#18120e] text-stone-400 hover:text-stone-200 border border-stone-800 text-xs px-3.5 py-2.5 rounded-xl font-medium cursor-pointer"
+              >
+                🔄 รีเซ็ตสแกนใหม่
+              </button>
+            </div>
+          </section>
+
+          {/* Right: Login Card */}
+          <section className="lg:col-span-5 flex justify-center">
+            <div className="w-full max-w-md bg-[#100c09]/95 border border-orange-500/25 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-orange-600 via-orange-400 to-amber-400" />
+
+              {!scannerUnlocked && (
+                <div className="absolute inset-0 bg-[#060504]/90 backdrop-blur-sm z-20 flex flex-col items-center justify-center p-6 text-center">
+                  <div className="w-12 h-12 rounded-2xl bg-orange-500/15 border border-orange-500/35 text-orange-400 flex items-center justify-center mb-3">
+                    <Lock size={22} />
+                  </div>
+                  <p className="text-base font-bold text-stone-100 mb-1">ระบบคลังสินค้าล็อกอยู่</p>
+                  <p className="text-xs text-stone-400 max-w-xs mb-4">
+                    ลากเครื่องสแกนไปทาบที่บาร์โค้ดค้างไว้ 2 วินาที หรือกดปุ่มด้านล่างเพื่อทดลองสแกนปลดล็อก
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleAutoScanDemo}
+                    className="bg-orange-500 hover:bg-orange-400 text-stone-950 font-bold text-xs px-5 py-2.5 rounded-xl cursor-pointer"
+                  >
+                    ⚡ สแกนอัตโนมัติเพื่อปลดล็อก
+                  </button>
+                </div>
+              )}
+
+              <div className="mb-6">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[11px] font-mono font-bold text-orange-400 uppercase">
+                    SANOH ANGLO-THAI SHIPPING
+                  </span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                    scannerUnlocked
+                      ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                  }`}>
+                    {scannerUnlocked ? 'UNLOCKED' : 'LOCKED'}
+                  </span>
+                </div>
+                <h1 className="text-2xl font-extrabold text-stone-100">
+                  ระบบจัดการสต็อก Neck Tag
+                </h1>
+                <p className="text-xs text-stone-400 mt-1">
+                  กรุณาเข้าสู่ระบบเพื่อใช้งานระบบ
+                </p>
+              </div>
+
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-stone-300 mb-1.5">ชื่อผู้ใช้ (Username)</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="เช่น admin_sanoh หรือ staff_sanoh"
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    className="w-full bg-[#060504] border border-stone-800 focus:border-orange-500 rounded-xl p-2.5 text-sm text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-stone-300 mb-1.5">รหัสผ่าน (Password)</label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="••••••••"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    className="w-full bg-[#060504] border border-stone-800 focus:border-orange-500 rounded-xl p-2.5 text-sm text-white outline-none"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={authLoading || !scannerUnlocked}
+                  className="w-full bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-stone-950 font-bold py-2.5 rounded-xl text-sm transition cursor-pointer"
+                >
+                  {authLoading ? 'กำลังตรวจสอบ...' : 'เข้าสู่ระบบ'}
+                </button>
+              </form>
+            </div>
+          </section>
+        </main>
       </div>
     );
   }
@@ -1660,7 +2051,7 @@ export default function App() {
                             {row.code_scope === 'daily_multi' ? (
                               <div className="flex flex-wrap items-center gap-2 text-[11px]">
                                 <span className="text-sky-300 font-medium flex items-center gap-1">
-                                  <Calendar size={13} /> ใช้งได้ถึงวันที่:
+                                  <Calendar size={13} /> ใช้งานได้ถึงวันที่:
                                 </span>
                                 <input
                                   type="date"
