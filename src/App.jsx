@@ -105,6 +105,7 @@ export default function App() {
     log: '> ระบบปิดอยู่ กด "เปิดคลัง" เพื่อเปิดไฟคลังและระบบสแกน'
   });
 
+  const svgStageRef = useRef(null);
   const scannerGroupRef = useRef(null);
   const barcodeTargetRef = useRef(null);
   const scanTimerRef = useRef(null);
@@ -116,8 +117,11 @@ export default function App() {
   const loginIdle2sTimerRef = useRef(null);
   const dragRef = useRef({
     dragging: false,
-    startX: 0,
-    startY: 0,
+    pointerId: null,
+    startClientX: 0,
+    startClientY: 0,
+    baseOffsetX: 0,
+    baseOffsetY: 0,
     offsetX: 0,
     offsetY: 0
   });
@@ -259,6 +263,7 @@ export default function App() {
     clearIdleLoginTimer();
     clear2sTimers();
     dragRef.current.dragging = false;
+    dragRef.current.pointerId = null;
     setScanInProgress(false);
     setPostScanReady(false);
     setLoginPaused(false);
@@ -269,6 +274,8 @@ export default function App() {
     setSweepPercent(0);
     setMonitorOpen(false);
     setScannerUnlocked(false);
+    dragRef.current.baseOffsetX = 0;
+    dragRef.current.baseOffsetY = 0;
     dragRef.current.offsetX = 0;
     dragRef.current.offsetY = 0;
     if (scannerGroupRef.current) {
@@ -293,6 +300,10 @@ export default function App() {
     clearScanAnimations();
     clearIdleLoginTimer();
     clear2sTimers();
+    dragRef.current.dragging = false;
+    dragRef.current.pointerId = null;
+    dragRef.current.baseOffsetX = 0;
+    dragRef.current.baseOffsetY = 0;
     dragRef.current.offsetX = 0;
     dragRef.current.offsetY = 0;
     if (scannerGroupRef.current) {
@@ -449,23 +460,40 @@ export default function App() {
     else abortScanHold();
   };
 
-  const handleScannerPointerDown = (e) => {
+  const getSvgScale = () => {
+    const svgEl = svgStageRef.current;
+    if (!svgEl) return { scaleX: 1, scaleY: 1 };
+    const rect = svgEl.getBoundingClientRect();
+    return {
+      scaleX: rect.width ? 600 / rect.width : 1,
+      scaleY: rect.height ? 420 / rect.height : 1
+    };
+  };
+
+  const startScannerDrag = (clientX, clientY, pointerId = null) => {
     if (!scanSystemPoweredOn || scannerUnlocked) return;
     window.clearTimeout(scanRelease2sTimerRef.current);
     scanRelease2sTimerRef.current = null;
     setScanInProgress(true);
     clearIdleLoginTimer();
-    e.currentTarget.setPointerCapture?.(e.pointerId);
+
     dragRef.current.dragging = true;
-    dragRef.current.startX = e.clientX - dragRef.current.offsetX;
-    dragRef.current.startY = e.clientY - dragRef.current.offsetY;
+    dragRef.current.pointerId = pointerId;
+    dragRef.current.startClientX = clientX;
+    dragRef.current.startClientY = clientY;
+    dragRef.current.baseOffsetX = dragRef.current.offsetX;
+    dragRef.current.baseOffsetY = dragRef.current.offsetY;
     playScannerTone(700, 70);
   };
 
-  const handleScannerPointerMove = (e) => {
+  const moveScannerDrag = (clientX, clientY) => {
     if (!dragRef.current.dragging || !scanSystemPoweredOn || scannerUnlocked) return;
-    const x = e.clientX - dragRef.current.startX;
-    const y = e.clientY - dragRef.current.startY;
+    const { scaleX, scaleY } = getSvgScale();
+    const dx = (clientX - dragRef.current.startClientX) * scaleX;
+    const dy = (clientY - dragRef.current.startClientY) * scaleY;
+    const x = dragRef.current.baseOffsetX + dx;
+    const y = dragRef.current.baseOffsetY + dy;
+
     dragRef.current.offsetX = x;
     dragRef.current.offsetY = y;
     if (scannerGroupRef.current) {
@@ -474,18 +502,58 @@ export default function App() {
     evaluateBarcodeHit();
   };
 
-  const handleScannerPointerUp = () => {
+  const endScannerDrag = () => {
     if (!dragRef.current.dragging) return;
     dragRef.current.dragging = false;
+    dragRef.current.pointerId = null;
     abortScanHold();
 
-    // หากปล่อยเมาส์และไม่ได้อยู่ในช่วงที่กำลังสแกนค้าง/จอเด้ง/หุบ ให้เริ่มจับเวลา 2 วินาทีเพื่อกลับมานับเวลาใหม่
+    // หากปล่อยเมาส์/นิ้วและไม่ได้อยู่ในช่วงที่กำลังสแกนค้าง/จอเด้ง/หุบ ให้เริ่มจับเวลา 2 วินาทีเพื่อกลับมานับเวลาใหม่
     if (!scannerUnlocked && !typingTimerRef.current && !monitorHideTimerRef.current) {
       window.clearTimeout(scanRelease2sTimerRef.current);
       scanRelease2sTimerRef.current = window.setTimeout(() => {
         setScanInProgress(false);
       }, 2000);
     }
+  };
+
+  const handleScannerPointerDown = (e) => {
+    if (e.pointerType === 'touch') return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    startScannerDrag(e.clientX, e.clientY, e.pointerId);
+  };
+
+  const handleScannerPointerMove = (e) => {
+    if (e.pointerType === 'touch') return;
+    moveScannerDrag(e.clientX, e.clientY);
+  };
+
+  const handleScannerPointerUp = (e) => {
+    if (e.pointerType === 'touch') return;
+    endScannerDrag();
+  };
+
+  const handleScannerTouchStart = (e) => {
+    if (!scanSystemPoweredOn || scannerUnlocked) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    e.preventDefault();
+    startScannerDrag(touch.clientX, touch.clientY, 'touch');
+  };
+
+  const handleScannerTouchMove = (e) => {
+    if (!dragRef.current.dragging) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    e.preventDefault();
+    moveScannerDrag(touch.clientX, touch.clientY);
+  };
+
+  const handleScannerTouchEnd = (e) => {
+    if (!dragRef.current.dragging) return;
+    e.preventDefault();
+    endScannerDrag();
   };
 
   // สวิตช์เปิด-ปิดคลัง (รวมไฟคลังสินค้า ระบบสแกน และระบบล็อกอิน)
@@ -1368,7 +1436,11 @@ export default function App() {
 
             {/* Warehouse SVG Stage */}
             <div className="relative w-full max-w-[580px] h-[360px] sm:h-[400px] flex items-center justify-center">
-              <svg className="w-full h-full overflow-visible" viewBox="0 0 600 420">
+              <svg
+                ref={svgStageRef}
+                className="w-full h-full overflow-visible touch-none select-none"
+                viewBox="0 0 600 420"
+              >
                 <defs>
                   <radialGradient id="spotCoreGlow1" cx="50%" cy="0%" r="85%">
                     <stop offset="0%" stopColor="#fff7ed" stopOpacity="0.95" />
@@ -1508,16 +1580,23 @@ export default function App() {
                   )}
                 </g>
 
-                {/* 5. Draggable Scanner */}
+                {/* 5. Draggable Scanner (รองรับทั้งเมาส์และทัชสกรีนมือถือโดยไม่เลื่อนหน้าจอ) */}
                 <g
                   ref={scannerGroupRef}
+                  className="touch-none select-none"
                   onPointerDown={handleScannerPointerDown}
                   onPointerMove={handleScannerPointerMove}
                   onPointerUp={handleScannerPointerUp}
                   onPointerCancel={handleScannerPointerUp}
+                  onTouchStart={handleScannerTouchStart}
+                  onTouchMove={handleScannerTouchMove}
+                  onTouchEnd={handleScannerTouchEnd}
+                  onTouchCancel={handleScannerTouchEnd}
                   opacity={scanSystemPoweredOn ? 1 : 0.45}
                   style={{
                     touchAction: 'none',
+                    WebkitUserSelect: 'none',
+                    userSelect: 'none',
                     cursor: !scanSystemPoweredOn || scannerUnlocked ? 'not-allowed' : 'grab'
                   }}
                 >
@@ -1874,7 +1953,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* ปุ่มแถบบน: แยกสีและขอบให้เด่นชัดทุกปุ่ม */}
           <div className="flex flex-wrap items-center gap-2.5">
             {isAdmin ? (
               <>
@@ -1943,7 +2021,7 @@ export default function App() {
           </div>
         </header>
 
-        {/* แถบเมนูนำทาง: แยกสถานะ Active กับ Inactive ให้ตัดกันชัดเจน */}
+        {/* แถบเมนูนำทาง */}
         <div className="flex flex-wrap items-center justify-between gap-3 my-6">
           <div className="flex items-center gap-2.5 bg-[#0c0907] p-1.5 rounded-2xl border border-stone-800">
             <button
@@ -1978,7 +2056,7 @@ export default function App() {
           )}
         </div>
 
-        {/* การ์ดสรุปข้อมูล 4 ช่อง: พื้นหลัง #16110d และขอบชัดเจน */}
+        {/* การ์ดสรุปข้อมูล 4 ช่อง */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <div className="bg-[#16110d] border border-orange-500/35 rounded-2xl p-5 shadow-xl">
             <div className="flex justify-between items-start">
@@ -2151,7 +2229,7 @@ export default function App() {
             </div>
           </div>
         ) : (
-          /* ตารางรายการ Neck Tag ทั้งหมด: แยกแถวรายการให้เด่นชัดด้วยกรอบและพื้นหลังต่างระดับ */
+          /* ตารางรายการ Neck Tag ทั้งหมด */
           <div className="bg-[#16110d] border border-orange-500/35 rounded-2xl p-5 shadow-xl">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
               <h2 className="font-bold text-white text-sm">รายการสต็อกคอขวด (Neck Tag) ทั้งหมด</h2>
